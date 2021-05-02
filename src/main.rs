@@ -19,32 +19,34 @@ async fn accept_connection(peer: SocketAddr, stream: TcpStream) {
     }
 }
 
-struct SimpleCallback {
+struct PathCapturingCallback {
     path: String,
 }
 
-impl Callback for SimpleCallback {
+impl Callback for &mut PathCapturingCallback {
     fn on_request(self, request: &Request, response: Response) -> StdResult<Response, ErrorResponse> {
-        if request.uri().path() != self.path {
+        let path = request.uri().path();
+        if !path.starts_with("/rooms/") {
             return Err(http::response::Response::builder()
                 .status(http::StatusCode::NOT_FOUND)
                 .body(None)
                 .unwrap());
         }
+        (&mut self.path).push_str(path);
         Ok(response)
     }
 }
 
 async fn handle_connection(peer: SocketAddr, stream: TcpStream) -> Result<()> {
-    let cb = SimpleCallback {
-        path: "/rooms".to_owned()
+    let mut cb = PathCapturingCallback {
+        path: String::new()
     };
-    let mut ws_stream = accept_hdr_async(stream, cb).await.expect("Failed to accept");
+    let mut ws_stream = accept_hdr_async(stream, &mut cb).await?;
     let id = "123".to_owned();
     let msg = LoginServerMessage { id, _type: "login".to_owned() };
     let data = serde_json::to_string(&msg).unwrap();
     ws_stream.send(data.into()).await?;
-    info!("New WebSocket connection: {}", peer);
+    info!("New WebSocket connection: {} {}", peer, cb.path);
 
     while let Some(msg) = ws_stream.next().await {
         let msg = msg?;
@@ -55,7 +57,6 @@ async fn handle_connection(peer: SocketAddr, stream: TcpStream) -> Result<()> {
 
     Ok(())
 }
-
 
 
 #[tokio::main]
