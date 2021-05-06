@@ -5,8 +5,6 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::rc::Rc;
 use std::sync::{Arc};
-// use std::sync::{Mutex};
-use tokio::sync::{Mutex};
 
 use futures_util::{SinkExt, StreamExt};
 use log::*;
@@ -17,6 +15,7 @@ use tokio_tungstenite::tungstenite::handshake::client::Request;
 use tokio_tungstenite::tungstenite::handshake::server::{Callback, ErrorResponse, Response};
 use tungstenite::{http, Result};
 use std::thread;
+use parking_lot::Mutex;
 
 
 #[tokio::main(flavor = "current_thread")]
@@ -35,34 +34,6 @@ async fn main() {
         tokio::spawn(accept_connection(rc, peer, stream));
     }
 }
-// fn main() {
-//     let counter = Arc::new(Mutex::new(0));
-//     let mut handles = vec![];
-//     let mut a: i32 = 0;
-//     inc(&mut a);
-//     println!("a: {}", a);
-//
-//
-//     for _ in 0..10 {
-//         let counter = Arc::clone(&counter);
-//         let handle = thread::spawn(move || {
-//             let mut num = counter.lock().unwrap();
-//             inc(&mut (*num))
-//             // *num += 1;
-//         });
-//         handles.push(handle);
-//     }
-//
-//     for handle in handles {
-//         handle.join().unwrap();
-//     }
-//
-//     println!("Result: {}", *counter.lock().unwrap());
-// }
-//
-// fn inc(value: &mut i32) {
-//     *value += 1;
-// }
 
 struct Room {
     id: String,
@@ -90,7 +61,7 @@ async fn handle_connection(mut space: Arc<Mutex<SpaceServer>>, peer: SocketAddr,
     let room_id = cb.path[ROOMS_PREFIX.len()..].to_owned();
     info!("New WebSocket connection: {} {}", peer, room_id);
     let id = {
-        let mut s = space.lock().await;
+        let mut s = space.lock();
         let room = s.rooms.entry(room_id.clone())
             .or_insert_with(|| Room { id: room_id.clone(), next_user_id: 0 });
         let id = room.next_user_id.to_string();
