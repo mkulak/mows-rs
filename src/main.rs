@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::rc::Rc;
 use std::sync::{Arc};
+// use std::sync::{Mutex};
 use tokio::sync::{Mutex};
 
 use futures_util::{SinkExt, StreamExt};
@@ -15,6 +16,7 @@ use tokio_tungstenite::{accept_hdr_async, tungstenite::Error};
 use tokio_tungstenite::tungstenite::handshake::client::Request;
 use tokio_tungstenite::tungstenite::handshake::server::{Callback, ErrorResponse, Response};
 use tungstenite::{http, Result};
+use std::thread;
 
 
 #[tokio::main(flavor = "current_thread")]
@@ -32,10 +34,38 @@ async fn main() {
         let rc = spaces_server.clone();
         tokio::spawn(async move {
             let mut guard = rc.lock().await;
-            guard.accept_connection(peer, stream)
+            accept_connection(&mut (*guard), peer, stream);
         });
     }
 }
+// fn main() {
+//     let counter = Arc::new(Mutex::new(0));
+//     let mut handles = vec![];
+//     let mut a: i32 = 0;
+//     inc(&mut a);
+//     println!("a: {}", a);
+//
+//
+//     for _ in 0..10 {
+//         let counter = Arc::clone(&counter);
+//         let handle = thread::spawn(move || {
+//             let mut num = counter.lock().unwrap();
+//             inc(&mut (*num))
+//             // *num += 1;
+//         });
+//         handles.push(handle);
+//     }
+//
+//     for handle in handles {
+//         handle.join().unwrap();
+//     }
+//
+//     println!("Result: {}", *counter.lock().unwrap());
+// }
+//
+// fn inc(value: &mut i32) {
+//     *value += 1;
+// }
 
 struct Room {
     id: String,
@@ -46,40 +76,38 @@ struct SpaceServer {
     rooms: HashMap<String, Room>,
 }
 
-impl SpaceServer {
-    async fn accept_connection(&mut self, peer: SocketAddr, stream: TcpStream) {
-        if let Err(e) = self.handle_connection(peer, stream).await {
-            match e {
-                Error::ConnectionClosed | Error::Protocol(_) | Error::Utf8 => (),
-                err => error!("Error processing connection: {}", err),
-            }
+async fn accept_connection(space: &mut SpaceServer, peer: SocketAddr, stream: TcpStream) {
+    if let Err(e) = handle_connection(space, peer, stream).await {
+        match e {
+            Error::ConnectionClosed | Error::Protocol(_) | Error::Utf8 => (),
+            err => error!("Error processing connection: {}", err),
+        }
+    }
+}
+
+async fn handle_connection(space: &mut SpaceServer, peer: SocketAddr, stream: TcpStream) -> Result<()> {
+    let mut cb = PathCapturingCallback {
+        path: String::new()
+    };
+    let mut ws_stream = accept_hdr_async(stream, &mut cb).await?;
+    let room_id = cb.path[ROOMS_PREFIX.len()..].to_owned();
+    info!("New WebSocket connection: {} {}", peer, room_id);
+    let room = space.rooms.entry(room_id.clone())
+        .or_insert_with(|| Room { id: room_id.clone(), next_user_id: 0 });
+    let id = room.next_user_id.to_string();
+    room.next_user_id += 1;
+    let msg = LoginServerMessage { id, _type: "login".to_owned() };
+    let data = serde_json::to_string(&msg).unwrap();
+    ws_stream.send(data.into()).await?;
+
+    while let Some(msg) = ws_stream.next().await {
+        let msg = msg?;
+        if msg.is_text() || msg.is_binary() {
+            ws_stream.send(msg).await?;
         }
     }
 
-    async fn handle_connection(&mut self, peer: SocketAddr, stream: TcpStream) -> Result<()> {
-        let mut cb = PathCapturingCallback {
-            path: String::new()
-        };
-        let mut ws_stream = accept_hdr_async(stream, &mut cb).await?;
-        let room_id = cb.path[ROOMS_PREFIX.len()..].to_owned();
-        info!("New WebSocket connection: {} {}", peer, room_id);
-        let room = self.rooms.entry(room_id.clone())
-            .or_insert_with(|| Room { id: room_id.clone(), next_user_id: 0 });
-        let id = room.next_user_id.to_string();
-        room.next_user_id += 1;
-        let msg = LoginServerMessage { id, _type: "login".to_owned() };
-        let data = serde_json::to_string(&msg).unwrap();
-        ws_stream.send(data.into()).await?;
-
-        while let Some(msg) = ws_stream.next().await {
-            let msg = msg?;
-            if msg.is_text() || msg.is_binary() {
-                ws_stream.send(msg).await?;
-            }
-        }
-
-        Ok(())
-    }
+    Ok(())
 }
 
 
