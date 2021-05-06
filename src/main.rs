@@ -32,10 +32,7 @@ async fn main() {
         let peer = stream.peer_addr().expect("connected streams should have a peer address");
         info!("Peer address: {}", peer);
         let rc = spaces_server.clone();
-        tokio::spawn(async move {
-            let mut guard = rc.lock().await;
-            accept_connection(&mut (*guard), peer, stream);
-        });
+        tokio::spawn(accept_connection(rc, peer, stream));
     }
 }
 // fn main() {
@@ -76,7 +73,7 @@ struct SpaceServer {
     rooms: HashMap<String, Room>,
 }
 
-async fn accept_connection(space: &mut SpaceServer, peer: SocketAddr, stream: TcpStream) {
+async fn accept_connection(mut space: Arc<Mutex<SpaceServer>>, peer: SocketAddr, stream: TcpStream) {
     if let Err(e) = handle_connection(space, peer, stream).await {
         match e {
             Error::ConnectionClosed | Error::Protocol(_) | Error::Utf8 => (),
@@ -85,17 +82,21 @@ async fn accept_connection(space: &mut SpaceServer, peer: SocketAddr, stream: Tc
     }
 }
 
-async fn handle_connection(space: &mut SpaceServer, peer: SocketAddr, stream: TcpStream) -> Result<()> {
+async fn handle_connection(mut space: Arc<Mutex<SpaceServer>>, peer: SocketAddr, stream: TcpStream) -> Result<()> {
     let mut cb = PathCapturingCallback {
         path: String::new()
     };
     let mut ws_stream = accept_hdr_async(stream, &mut cb).await?;
     let room_id = cb.path[ROOMS_PREFIX.len()..].to_owned();
     info!("New WebSocket connection: {} {}", peer, room_id);
-    let room = space.rooms.entry(room_id.clone())
-        .or_insert_with(|| Room { id: room_id.clone(), next_user_id: 0 });
-    let id = room.next_user_id.to_string();
-    room.next_user_id += 1;
+    let id = {
+        let mut s = space.lock().await;
+        let room = s.rooms.entry(room_id.clone())
+            .or_insert_with(|| Room { id: room_id.clone(), next_user_id: 0 });
+        let id = room.next_user_id.to_string();
+        room.next_user_id += 1;
+        id
+    };
     let msg = LoginServerMessage { id, _type: "login".to_owned() };
     let data = serde_json::to_string(&msg).unwrap();
     ws_stream.send(data.into()).await?;
