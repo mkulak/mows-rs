@@ -147,6 +147,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "futures-channel"
+version = "0.3.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce79c6a52a299137a6013061e0cf0e688fce5d7f1bc60125f520912fdb29ec25"
+dependencies = [
+ "futures-core",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -695,6 +704,7 @@ name = "spaces-poc-rust"
 version = "0.1.0"
 dependencies = [
  "env_logger",
+ "futures-channel",
  "futures-util",
  "log",
  "parking_lot",
