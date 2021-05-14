@@ -16,11 +16,12 @@ use tokio_tungstenite::tungstenite::handshake::client::Request;
 use tokio_tungstenite::tungstenite::handshake::server::{Callback, ErrorResponse, Response};
 use tungstenite::{http, Result};
 use tungstenite::protocol::Message;
+use serde_json::value::Value as JValue;
 
 fn create_spaces_state() -> SpacesState {
     SpacesState {
         rooms: HashMap::new(),
-        player2room: HashMap::new(),
+        players: HashMap::new(),
         clients: HashMap::new(),
         next_player_id: 0,
     }
@@ -30,14 +31,24 @@ fn create_room(room_id: &String) -> Room {
     Room { id: room_id.clone(), participants: HashSet::new() }
 }
 
+fn create_player(player_id: PlayerId, room_id: String) -> Player {
+    Player { id: player_id, room_id, pos: Pos { x: 0, y: 0 } }
+}
+
 struct Room {
     id: String,
     participants: HashSet<PlayerId>,
 }
 
+struct Player {
+    id: PlayerId,
+    room_id: RoomId,
+    pos: XY
+}
+
 struct SpacesState {
     rooms: HashMap<RoomId, Room>,
-    player2room: HashMap<PlayerId, RoomId>,
+    players: HashMap<PlayerId, Player>,
     clients: HashMap<PlayerId, Tx>,
     next_player_id: u32,
 }
@@ -52,6 +63,27 @@ pub struct LoginServerMessage {
     pub id: String,
     #[serde(rename = "type")]
     pub _type: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PongServerMessage {
+    pub id: i64,
+    #[serde(rename = "type")]
+    pub _type: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum ClientCommand {
+    #[serde(rename = "move")]
+    Move { pos: XY },
+    #[serde(rename = "ping")]
+    Ping { id: i64 },
+}
+
+pub struct XY {
+    pub x: u32,
+    pub y: u32,
 }
 
 const ROOMS_PREFIX: &'static str = "/rooms/";
@@ -123,7 +155,7 @@ async fn handle_connection(state: Ams, stream: TcpStream, peer: SocketAddr) {
         s.next_player_id += 1;
         let room = s.rooms.entry(room_id.clone()).or_insert_with(|| create_room(&room_id));
         room.participants.insert(player_id.clone());
-        s.player2room.insert(player_id.clone(), room_id);
+        s.players.insert(player_id.clone(), create_player(room_id, player_id.clone()));
 
         let msg = LoginServerMessage { id: player_id.clone(), _type: "login".to_owned() };
         let data = serde_json::to_string(&msg).unwrap();
@@ -136,14 +168,20 @@ async fn handle_connection(state: Ams, stream: TcpStream, peer: SocketAddr) {
 
 
     let handle_incoming = incoming.try_for_each(|msg| {
-        debug!("Received a message from {} {}: {}", player_id, peer, msg.to_text().unwrap());
+        let vec = msg.into_data();
+        let msg: JValue = serde_json::from_slice(&vec[..]).unwrap();
+        debug!("Received a message from {} {}: {}", player_id, peer, msg.clone().to_string());
+        if let JValue::Object(t) = msg {
+            let mt = t.get("type");
+            debug!("message of type: {}", mt.unwrap_or(&JValue::Null).to_string());
+        }
         let s = state.lock();
-
         let broadcast_recipients =
             s.clients.iter().filter(|(id, _)| id != &&player_id).map(|(_, ws_sink)| ws_sink);
 
         for recp in broadcast_recipients {
-            recp.unbounded_send(msg.clone()).unwrap();
+            // recp.unbounded_send(msg.clone().into()).unwrap();
+            recp.unbounded_send("pong".clone().into()).unwrap();
         }
 
         future::ok(())
@@ -157,20 +195,3 @@ async fn handle_connection(state: Ams, stream: TcpStream, peer: SocketAddr) {
     debug!("{} {} disconnected", &peer, player_id);
     state.lock().clients.remove(&player_id);
 }
-
-// async fn handle_connection(mut space: Arc<Mutex<SpacesState>>, peer: SocketAddr, stream: TcpStream) -> Result<()> {
-//     // let msg = LoginServerMessage { id, _type: "login".to_owned() };
-//     // let data = serde_json::to_string(&msg).unwrap();
-//     // ws.send(data.into()).await?;
-//
-//     // while let Some(msg) = ws.next().await {
-//     //     let msg = msg?;
-//     //     if msg.is_text() {
-//     //         // let serde_json::from_slice(msg.into());
-//     //         info!("got: {}", msg.clone().into_text().unwrap());
-//     //         ws.send(msg).await?;
-//     //     }
-//     // }
-//
-//     Ok(())
-// }
