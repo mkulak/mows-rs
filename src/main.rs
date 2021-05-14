@@ -30,7 +30,7 @@ fn create_room(room_id: &String) -> Room {
     Room { id: room_id.clone(), participants: HashSet::new() }
 }
 
-fn create_player(player_id: PlayerId, room_id: String) -> Player {
+fn create_player(player_id: PlayerId, room_id: RoomId) -> Player {
     Player { id: player_id, room_id, pos: XY { x: 0, y: 0 } }
 }
 
@@ -56,20 +56,13 @@ struct SpacesState {
 
 type RoomId = String;
 
-type PlayerId = String;
+type PlayerId = u32;
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct LoginServerMessage {
-    pub id: String,
-    #[serde(rename = "type")]
-    pub _type: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct PongServerMessage {
-    pub id: i64,
-    #[serde(rename = "type")]
-    pub _type: String,
+enum ServerMessage {
+    Login { id: PlayerId, #[serde(rename = "type")] _type: String },
+    Pong { id: i64, #[serde(rename = "type")] _type: String },
+    FullUpdate { room_id: String, players: HashMap<PlayerId, XY>, #[serde(rename = "type")] _type: String }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -81,7 +74,7 @@ enum ClientCommand {
     Ping { id: i64 },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Copy, Clone)]
 pub struct XY {
     pub x: u32,
     pub y: u32,
@@ -149,22 +142,7 @@ async fn handle_connection(state: Ams, stream: TcpStream) {
     let (tx, rx) = unbounded();
     let (outgoing, incoming) = ws_stream.split();
 
-    let player_id = {
-        let mut s = state.lock();
-        let player_id = s.next_player_id.to_string();
-        s.next_player_id += 1;
-        let room = s.rooms.entry(room_id.clone()).or_insert_with(|| create_room(&room_id));
-        room.participants.insert(player_id.clone());
-        s.players.insert(player_id.clone(), create_player(room_id.clone(), player_id.clone()));
-
-        let msg = LoginServerMessage { id: player_id.clone(), _type: "login".to_owned() };
-        let data = serde_json::to_string(&msg).unwrap();
-        let msg: Message = data.into();
-        tx.unbounded_send(msg).unwrap();
-        s.clients.insert(player_id.clone(), tx);
-
-        player_id
-    };
+    let player_id = on_join(tx, &room_id, state.clone());
     debug!("Connected {} room {}", player_id, room_id.clone());
 
     let handle_incoming = incoming.try_for_each(|msg| {
@@ -181,7 +159,36 @@ async fn handle_connection(state: Ams, stream: TcpStream) {
     future::select(handle_incoming, receive_from_others).await;
 
     debug!("disconnected {}", player_id);
-    state.lock().clients.remove(&player_id);
+    on_leave(&room_id, &player_id, state);
+}
+
+fn on_leave(room_id: &RoomId, player_id: &PlayerId, state: Ams) {
+    let mut s = state.lock();
+    s.clients.remove(player_id);
+    s.players_with_updates.remove(player_id);
+    s.players.remove(player_id);
+    s.rooms.get_mut(room_id).map(|room| room.participants.remove(player_id));
+}
+
+fn on_join(tx: UnboundedSender<Message>, room_id: &RoomId, state: Ams) -> PlayerId {
+    let mut s = state.lock();
+    let player_id = s.next_player_id;
+    s.next_player_id += 1;
+    let room = s.rooms.entry(room_id.clone()).or_insert_with(|| create_room(&room_id));
+    room.participants.insert(player_id);
+    s.players.insert(player_id.clone(), create_player(player_id, room_id.clone()));
+
+    let msg = ServerMessage::Login { id: player_id, _type: "login".to_owned() };
+    tx.unbounded_send(serde_json::to_string(&msg).unwrap().into()).unwrap();
+    let msg = ServerMessage::FullUpdate {
+        room_id: room_id.clone(),
+        players: s.players.iter().map(|(id, player)| (*id, player.pos.clone())).collect(),
+        _type: "full_update".to_owned()
+    };
+    tx.unbounded_send(serde_json::to_string(&msg).unwrap().into()).unwrap();
+    s.clients.insert(player_id.clone(), tx);
+
+    player_id
 }
 
 fn handle_client_command(cmd: ClientCommand, player_id: &PlayerId, state: Ams) {
@@ -196,10 +203,9 @@ fn handle_client_command(cmd: ClientCommand, player_id: &PlayerId, state: Ams) {
         }
         ClientCommand::Ping { id } => {
             debug!("Pong {} for {}", id, player_id);
-            let reply = PongServerMessage { id, _type: "pong".to_owned() };
-            let data = serde_json::to_string(&reply).unwrap();
-            let msg: Message = data.into();
-            s.clients.get(player_id).map(|tx| tx.unbounded_send(msg));
+            let reply = ServerMessage::Pong{ id, _type: "pong".to_owned() };
+            let msg = serde_json::to_string(&reply).unwrap();
+            s.clients.get(player_id).map(|tx| tx.unbounded_send(msg.into()));
         }
     }
 }
