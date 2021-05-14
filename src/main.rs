@@ -1,28 +1,27 @@
-use std::{env, io::Error as IoError, net::SocketAddr, sync::Arc};
+use std::{env, sync::Arc};
 use std::collections::{HashMap, HashSet};
 use std::result::Result as StdResult;
 
 use futures_channel::mpsc::{unbounded, UnboundedSender};
-use futures_util::{future, pin_mut, SinkExt, stream::TryStreamExt, StreamExt};
+use futures_util::{future, pin_mut, stream::TryStreamExt, StreamExt};
 use log::*;
 use parking_lot::Mutex;
 use rand::{Rng, thread_rng};
 use rand::distributions::Alphanumeric;
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
-use tokio_tungstenite::{accept_hdr_async, tungstenite::Error, WebSocketStream};
+use tokio_tungstenite::accept_hdr_async;
 use tokio_tungstenite::tungstenite::handshake::client::Request;
 use tokio_tungstenite::tungstenite::handshake::server::{Callback, ErrorResponse, Response};
-use tungstenite::{http, Result};
+use tungstenite::http;
 use tungstenite::protocol::Message;
-use serde_json::value::Value as JValue;
 
 fn create_spaces_state() -> SpacesState {
     SpacesState {
         rooms: HashMap::new(),
         players: HashMap::new(),
         clients: HashMap::new(),
+        players_with_updates: HashSet::new(),
         next_player_id: 0,
     }
 }
@@ -32,7 +31,7 @@ fn create_room(room_id: &String) -> Room {
 }
 
 fn create_player(player_id: PlayerId, room_id: String) -> Player {
-    Player { id: player_id, room_id, pos: Pos { x: 0, y: 0 } }
+    Player { id: player_id, room_id, pos: XY { x: 0, y: 0 } }
 }
 
 struct Room {
@@ -43,13 +42,14 @@ struct Room {
 struct Player {
     id: PlayerId,
     room_id: RoomId,
-    pos: XY
+    pos: XY,
 }
 
 struct SpacesState {
     rooms: HashMap<RoomId, Room>,
     players: HashMap<PlayerId, Player>,
     clients: HashMap<PlayerId, Tx>,
+    players_with_updates: HashSet<PlayerId>,
     next_player_id: u32,
 }
 
@@ -81,6 +81,7 @@ enum ClientCommand {
     Ping { id: i64 },
 }
 
+#[derive(Debug, Serialize, Deserialize)]
 pub struct XY {
     pub x: u32,
     pub y: u32,
@@ -124,9 +125,9 @@ async fn main() {
     let addr = env::args().nth(1).unwrap_or_else(|| "127.0.0.1:7000".to_string());
     let state = Arc::new(Mutex::new(create_spaces_state()));
     let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
-    println!("Listening on: {}", addr);
-    while let Ok((stream, addr)) = listener.accept().await {
-        tokio::spawn(handle_connection(state.clone(), stream, addr));
+    info!("Listening on: {}", addr);
+    while let Ok((stream, _addr)) = listener.accept().await {
+        tokio::spawn(handle_connection(state.clone(), stream));
     }
 }
 
@@ -140,11 +141,10 @@ async fn main() {
 //     }
 // }
 
-async fn handle_connection(state: Ams, stream: TcpStream, peer: SocketAddr) {
+async fn handle_connection(state: Ams, stream: TcpStream) {
     let mut callback = PathCapturingCallback { path: String::new() };
     let ws_stream = accept_hdr_async(stream, &mut callback).await.unwrap();
     let room_id = callback.path[ROOMS_PREFIX.len()..].to_owned();
-    debug!("New WebSocket connection: {} {}", peer, room_id);
 
     let (tx, rx) = unbounded();
     let (outgoing, incoming) = ws_stream.split();
@@ -155,7 +155,7 @@ async fn handle_connection(state: Ams, stream: TcpStream, peer: SocketAddr) {
         s.next_player_id += 1;
         let room = s.rooms.entry(room_id.clone()).or_insert_with(|| create_room(&room_id));
         room.participants.insert(player_id.clone());
-        s.players.insert(player_id.clone(), create_player(room_id, player_id.clone()));
+        s.players.insert(player_id.clone(), create_player(room_id.clone(), player_id.clone()));
 
         let msg = LoginServerMessage { id: player_id.clone(), _type: "login".to_owned() };
         let data = serde_json::to_string(&msg).unwrap();
@@ -165,25 +165,13 @@ async fn handle_connection(state: Ams, stream: TcpStream, peer: SocketAddr) {
 
         player_id
     };
-
+    debug!("Connected {} room {}", player_id, room_id.clone());
 
     let handle_incoming = incoming.try_for_each(|msg| {
         let vec = msg.into_data();
-        let msg: JValue = serde_json::from_slice(&vec[..]).unwrap();
-        debug!("Received a message from {} {}: {}", player_id, peer, msg.clone().to_string());
-        if let JValue::Object(t) = msg {
-            let mt = t.get("type");
-            debug!("message of type: {}", mt.unwrap_or(&JValue::Null).to_string());
-        }
-        let s = state.lock();
-        let broadcast_recipients =
-            s.clients.iter().filter(|(id, _)| id != &&player_id).map(|(_, ws_sink)| ws_sink);
-
-        for recp in broadcast_recipients {
-            // recp.unbounded_send(msg.clone().into()).unwrap();
-            recp.unbounded_send("pong".clone().into()).unwrap();
-        }
-
+        let cmd: ClientCommand = serde_json::from_slice(&vec[..]).unwrap();
+        debug!("Got message from {}: {:?}", player_id, cmd);
+        handle_client_command(cmd, &player_id, state.clone());
         future::ok(())
     });
 
@@ -192,6 +180,35 @@ async fn handle_connection(state: Ams, stream: TcpStream, peer: SocketAddr) {
     pin_mut!(handle_incoming, receive_from_others);
     future::select(handle_incoming, receive_from_others).await;
 
-    debug!("{} {} disconnected", &peer, player_id);
+    debug!("disconnected {}", player_id);
     state.lock().clients.remove(&player_id);
 }
+
+fn handle_client_command(cmd: ClientCommand, player_id: &PlayerId, state: Ams) {
+    let mut s = state.lock();
+    match cmd {
+        ClientCommand::Move { pos } => {
+            s.players.get_mut(player_id).map(|player| {
+                debug!("Changing pos for {} to {:?}", player_id, pos);
+                player.pos = pos;
+            });
+            s.players_with_updates.insert(player_id.clone());
+        }
+        ClientCommand::Ping { id } => {
+            debug!("Pong {} for {}", id, player_id);
+            let reply = PongServerMessage { id, _type: "pong".to_owned() };
+            let data = serde_json::to_string(&reply).unwrap();
+            let msg: Message = data.into();
+            s.clients.get(player_id).map(|tx| tx.unbounded_send(msg));
+        }
+    }
+}
+
+// let broadcast_recipients =
+// s.clients.iter().filter(|(id, _)| id != &&player_id).map(|(_, ws_sink)| ws_sink);
+//
+// for recp in broadcast_recipients {
+// // recp.unbounded_send(msg.clone().into()).unwrap();
+// recp.unbounded_send("pong".clone().into()).unwrap();
+// }
+//
