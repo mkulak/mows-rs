@@ -97,17 +97,22 @@ fn on_join(tx: UnboundedSender<Message>, room_id: &RoomId, state: Ams) -> Player
     let room = s.rooms.entry(room_id.clone()).or_insert_with(|| create_room(&room_id));
     room.participants.insert(player_id);
     s.players.insert(player_id.clone(), create_player(player_id, room_id.clone()));
-
-    let msg = ServerMessage::Login { id: player_id };
-    tx.unbounded_send(serde_json::to_string(&msg).unwrap().into()).unwrap();
-    let msg = ServerMessage::FullUpdate {
-        room_id: room_id.clone(),
-        players: s.players.iter().map(|(id, player)| (*id, player.pos.clone())).collect(),
-    };
-    tx.unbounded_send(serde_json::to_string(&msg).unwrap().into()).unwrap();
     s.clients.insert(player_id.clone(), tx);
 
+    let msg = ServerMessage::Login { id: player_id };
+    send(&*s, &player_id, &msg);
+
+    let players = s.players.iter().map(|(id, player)| (*id, player.pos.clone())).collect();
+    let msg = ServerMessage::FullUpdate { room_id: room_id.clone(), players };
+    send(&*s, &player_id, &msg);
+
     player_id
+}
+
+fn send(s: &SpacesState, player_id: &PlayerId, msg: &ServerMessage) {
+    s.clients.get(player_id).map(|tx|
+        tx.unbounded_send(serde_json::to_string(&msg).unwrap().into()).unwrap()
+    );
 }
 
 fn handle_client_command(cmd: ClientCommand, player_id: &PlayerId, room_id: &RoomId, state: Ams) {
@@ -123,8 +128,7 @@ fn handle_client_command(cmd: ClientCommand, player_id: &PlayerId, room_id: &Roo
         }
         ClientCommand::Ping { id } => {
             let reply = ServerMessage::Pong { id };
-            let msg = serde_json::to_string(&reply).unwrap();
-            s.clients.get(player_id).map(|tx| tx.unbounded_send(msg.into()));
+            send(&*s, &player_id, &reply);
         }
     }
 }
@@ -144,10 +148,9 @@ fn tick(state: Ams) {
                 });
             }
             let cmd = ServerMessage::Update { ids: &ids[..], xs: &xs[..], ys: &ys[..] };
-            debug!("Send room update  {:?}", cmd);
-            let msg = serde_json::to_vec(&cmd).unwrap();
+            debug!("Send room update  {:?} to {} participants", cmd, room.participants.len());
             for p_id in &(room.participants) {
-                s.clients.get(p_id).map(|tx| tx.unbounded_send(msg.clone().into()));
+                send(&*s, &p_id, &cmd);
             }
         }
     }

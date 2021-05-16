@@ -57,6 +57,10 @@ pub enum ServerMessage<'a> {
     FullUpdate { #[serde(rename = "roomId")] room_id: String, players: HashMap<PlayerId, XY> },
     #[serde(rename = "update")]
     Update { ids: &'a [PlayerId], xs: &'a [f64], ys: &'a [f64] },
+    #[serde(rename = "add")]
+    AddPlayer { id: PlayerId, pos: XY },
+    #[serde(rename = "remove")]
+    RemovePlayer { id: PlayerId },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
