@@ -1,26 +1,19 @@
-mod domain;
-mod utils;
-
 use std::{env, sync::Arc};
-use std::collections::{HashMap, HashSet};
-use std::result::Result as StdResult;
 use std::time::Duration;
 
 use futures_channel::mpsc::{unbounded, UnboundedSender};
 use futures_util::{future, pin_mut, stream::TryStreamExt, StreamExt};
 use log::*;
 use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::accept_hdr_async;
-use tokio_tungstenite::tungstenite::handshake::client::Request;
-use tokio_tungstenite::tungstenite::handshake::server::{Callback, ErrorResponse, Response};
-use tungstenite::http;
 use tungstenite::protocol::Message;
+
 use domain::*;
 use utils::*;
 
-
+mod domain;
+mod utils;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
