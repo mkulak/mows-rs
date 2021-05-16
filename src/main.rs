@@ -1,3 +1,6 @@
+mod domain;
+mod utils;
+
 use std::{env, sync::Arc};
 use std::collections::{HashMap, HashSet};
 use std::result::Result as StdResult;
@@ -7,8 +10,6 @@ use futures_channel::mpsc::{unbounded, UnboundedSender};
 use futures_util::{future, pin_mut, stream::TryStreamExt, StreamExt};
 use log::*;
 use parking_lot::Mutex;
-use rand::{Rng, thread_rng};
-use rand::distributions::Alphanumeric;
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::accept_hdr_async;
@@ -16,106 +17,10 @@ use tokio_tungstenite::tungstenite::handshake::client::Request;
 use tokio_tungstenite::tungstenite::handshake::server::{Callback, ErrorResponse, Response};
 use tungstenite::http;
 use tungstenite::protocol::Message;
+use domain::*;
+use utils::*;
 
-fn create_spaces_state() -> SpacesState {
-    SpacesState {
-        rooms: HashMap::new(),
-        players: HashMap::new(),
-        clients: HashMap::new(),
-        next_player_id: 0,
-    }
-}
 
-fn create_room(_: &RoomId) -> Room {
-    Room {
-        participants: HashSet::new(),
-        players_with_updates: HashSet::new(),
-    }
-}
-
-fn create_player(_: PlayerId, _: RoomId) -> Player {
-    Player { pos: XY { x: 0.0, y: 0.0 } }
-}
-
-struct Room {
-    participants: HashSet<PlayerId>,
-    players_with_updates: HashSet<PlayerId>,
-}
-
-struct Player {
-    pos: XY,
-}
-
-struct SpacesState {
-    rooms: HashMap<RoomId, Room>,
-    players: HashMap<PlayerId, Player>,
-    clients: HashMap<PlayerId, Tx>,
-    next_player_id: u32,
-}
-
-type RoomId = String;
-
-type PlayerId = u32;
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-enum ServerMessage<'a> {
-    #[serde(rename = "login")]
-    Login { id: PlayerId },
-    #[serde(rename = "pong")]
-    Pong { id: i64 },
-    #[serde(rename = "full_update")]
-    FullUpdate { #[serde(rename = "roomId")] room_id: String, players: HashMap<PlayerId, XY> },
-    #[serde(rename = "update")]
-    Update { ids: &'a [PlayerId], xs: &'a [f64], ys: &'a [f64] },
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type")]
-enum ClientCommand {
-    #[serde(rename = "move")]
-    Move { pos: XY },
-    #[serde(rename = "ping")]
-    Ping { id: i64 },
-}
-
-#[derive(Debug, Serialize, Deserialize, Copy, Clone)]
-pub struct XY {
-    pub x: f64,
-    pub y: f64,
-}
-
-const ROOMS_PREFIX: &'static str = "/rooms/";
-
-struct PathCapturingCallback {
-    path: String,
-}
-
-impl Callback for &mut PathCapturingCallback {
-    fn on_request(self, request: &Request, response: Response) -> StdResult<Response, ErrorResponse> {
-        let path = request.uri().path();
-        if !path.starts_with(ROOMS_PREFIX) {
-            return Err(http::response::Response::builder()
-                .status(http::StatusCode::NOT_FOUND)
-                .body(None)
-                .unwrap());
-        }
-        (&mut self.path).push_str(path);
-        Ok(response)
-    }
-}
-
-// fn random_id() -> String {
-//     return thread_rng()
-//         .sample_iter(&Alphanumeric)
-//         .take(22)
-//         .map(char::from)
-//         .collect();
-// }
-//
-
-type Tx = UnboundedSender<Message>;
-type Ams = Arc<Mutex<SpacesState>>;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -126,21 +31,19 @@ async fn main() {
     serve(&addr, state).await
 }
 
+async fn schedule_tick(state: Ams) {
+    let mut interval = tokio::time::interval(Duration::from_millis(200));
+    loop {
+        interval.tick().await;
+        tick(state.clone());
+    }
+}
+
 async fn serve(addr: &String, state: Ams) {
     let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
     info!("Listening on: {}", addr);
     while let Ok((stream, _addr)) = listener.accept().await {
         tokio::spawn(handle_connection(state.clone(), stream));
-    }
-}
-
-async fn schedule_tick(state: Ams) {
-    let mut interval = tokio::time::interval(Duration::from_millis(200));
-    loop {
-        interval.tick().await;
-        // let instant = interval.tick().await;
-        // info!("tick {:?}", instant);
-        tick(state.clone());
     }
 }
 
@@ -219,7 +122,7 @@ fn handle_client_command(cmd: ClientCommand, player_id: &PlayerId, room_id: &Roo
     match cmd {
         ClientCommand::Move { pos } => {
             s.players.get_mut(player_id).map(|player|
-                player.pos = pos;
+                player.pos = pos
             );
             s.rooms.get_mut(room_id).map(|room|
                 room.players_with_updates.insert(player_id.clone())
