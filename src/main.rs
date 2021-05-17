@@ -11,6 +11,7 @@ use tungstenite::protocol::Message;
 
 use domain::*;
 use utils::*;
+use std::collections::HashSet;
 
 mod domain;
 mod utils;
@@ -88,6 +89,8 @@ fn on_leave(room_id: &RoomId, player_id: &PlayerId, state: Ams) {
         room.participants.remove(player_id);
         room.players_with_updates.remove(player_id);
     });
+    let participants = s.rooms.get(room_id).map(|room| room.participants.clone()).unwrap_or(HashSet::new());
+    send_to_all(&*s, participants.iter(), &ServerMessage::RemovePlayer { id: *player_id })
 }
 
 fn on_join(tx: UnboundedSender<Message>, room_id: &RoomId, state: Ams) -> PlayerId {
@@ -95,8 +98,12 @@ fn on_join(tx: UnboundedSender<Message>, room_id: &RoomId, state: Ams) -> Player
     let player_id = s.next_player_id;
     s.next_player_id += 1;
     let room = s.rooms.entry(room_id.clone()).or_insert_with(|| create_room(&room_id));
+    let participants = room.participants.clone();
     room.participants.insert(player_id);
-    s.players.insert(player_id.clone(), create_player(player_id, room_id.clone()));
+    
+    let player = create_player(player_id, room_id.clone());
+    let pos = player.pos;
+    s.players.insert(player_id.clone(), player);
     s.clients.insert(player_id.clone(), tx);
 
     let msg = ServerMessage::Login { id: player_id };
@@ -104,8 +111,8 @@ fn on_join(tx: UnboundedSender<Message>, room_id: &RoomId, state: Ams) -> Player
 
     let players = s.players.iter().map(|(id, player)| (*id, player.pos.clone())).collect();
     let msg = ServerMessage::FullUpdate { room_id: room_id.clone(), players };
-    send(&*s, &player_id, &msg);
-
+    send(&s, &player_id, &msg);
+    send_to_all(&*s, participants.iter(), &ServerMessage::AddPlayer { id: player_id, pos });
     player_id
 }
 
@@ -113,6 +120,10 @@ fn send(s: &SpacesState, player_id: &PlayerId, msg: &ServerMessage) {
     s.clients.get(player_id).map(|tx|
         tx.unbounded_send(serde_json::to_string(&msg).unwrap().into()).unwrap()
     );
+}
+
+fn send_to_all<'a>(s: &SpacesState, ids: impl Iterator<Item=&'a PlayerId>, msg: &ServerMessage) {
+    ids.for_each(|id| send(s, &id, msg));
 }
 
 fn handle_client_command(cmd: ClientCommand, player_id: &PlayerId, room_id: &RoomId, state: Ams) {
@@ -140,18 +151,16 @@ fn tick(state: Ams) {
             let mut ids = Vec::new();
             let mut xs = Vec::new();
             let mut ys = Vec::new();
-            for p_id in &(room.players_with_updates) {
-                s.players.get(p_id).map(|player| {
-                    ids.push(*p_id);
+            for player_id in &(room.players_with_updates) {
+                s.players.get(player_id).map(|player| {
+                    ids.push(*player_id);
                     xs.push(player.pos.x);
                     ys.push(player.pos.y);
                 });
             }
             let cmd = ServerMessage::Update { ids: &ids[..], xs: &xs[..], ys: &ys[..] };
             debug!("Send room update  {:?} to {} participants", cmd, room.participants.len());
-            for p_id in &(room.participants) {
-                send(&*s, &p_id, &cmd);
-            }
+            send_to_all(&*s, room.participants.iter(), &cmd);
         }
     }
     for room in s.rooms.values_mut() {
