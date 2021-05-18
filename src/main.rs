@@ -6,12 +6,14 @@ use futures_util::{future, pin_mut, stream::TryStreamExt, StreamExt};
 use log::*;
 use parking_lot::Mutex;
 use tokio::net::{TcpListener, TcpStream};
-use tokio_tungstenite::accept_hdr_async;
+use tokio_tungstenite::{accept_hdr_async};
 use tungstenite::protocol::Message;
 
 use domain::*;
 use utils::*;
 use std::collections::HashSet;
+use std::net::SocketAddr;
+use tungstenite::error::Error;
 
 mod domain;
 mod utils;
@@ -36,24 +38,21 @@ async fn schedule_tick(state: Ams) {
 async fn serve(addr: &String, state: Ams) {
     let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
     info!("Listening on: {}", addr);
-    while let Ok((stream, _addr)) = listener.accept().await {
-        tokio::spawn(handle_connection(state.clone(), stream));
+    while let Ok((stream, peer)) = listener.accept().await {
+        tokio::spawn(accept_connection(state.clone(), stream, peer));
     }
 }
 
-// async fn accept_connection(state: Ams, stream: TcpStream, peer: SocketAddr) {
-//     debug!("Incoming TCP connection from: {}", peer);
-//     if let Err(e) = handle_connection(state, stream, peer).await {
-//         match e {
-//             Error::ConnectionClosed | Error::Protocol(_) | Error::Utf8 => (),
-//             err => error!("Error processing connection: {}", err),
-//         }
-//     }
-// }
+async fn accept_connection(state: Ams, stream: TcpStream, peer: SocketAddr) {
+    debug!("Incoming TCP connection from: {}", peer);
+    if let Err(e) = handle_connection(state, stream).await {
+        error!("Error processing connection: {:?}", e)
+    }
+}
 
-async fn handle_connection(state: Ams, stream: TcpStream) {
+async fn handle_connection(state: Ams, stream: TcpStream) -> Result<(), MowsError> {
     let mut callback = PathCapturingCallback { path: String::new() };
-    let ws_stream = accept_hdr_async(stream, &mut callback).await.unwrap();
+    let ws_stream = accept_hdr_async(stream, &mut callback).await.map_err(|e| e.into())?;
     let room_id = callback.path[ROOMS_PREFIX.len()..].to_owned();
 
     let (tx, rx) = unbounded();
@@ -65,11 +64,18 @@ async fn handle_connection(state: Ams, stream: TcpStream) {
     let handle_incoming = incoming.try_for_each(|msg| {
         if msg.is_text() {
             let vec = msg.into_data();
-            let cmd: ClientCommand = serde_json::from_slice(&vec[..]).unwrap();
-            debug!("Got message from {}: {:?}", player_id, cmd);
-            handle_client_command(cmd, &player_id, &room_id, state.clone());
+            let result = serde_json::from_slice::<ClientCommand>(&vec[..]);
+            match result {
+                Ok(cmd) => {
+                    debug!("Got message from {}: {:?}", player_id, cmd);
+                    handle_client_command(cmd, &player_id, &room_id, state.clone());
+                    future::ok(())
+                }
+                Err(_) => future::err(Error::Utf8) // TODO: figure out how to provide actual error
+            }
+        } else {
+            future::ok(())
         }
-        future::ok(())
     });
 
     let receive_from_others = rx.map(Ok).forward(outgoing);
@@ -79,17 +85,18 @@ async fn handle_connection(state: Ams, stream: TcpStream) {
 
     debug!("disconnected {}", player_id);
     on_leave(&room_id, &player_id, state);
+    Ok(())
 }
 
 fn on_leave(room_id: &RoomId, player_id: &PlayerId, state: Ams) {
     let mut s = state.lock();
     s.clients.remove(player_id);
     s.players.remove(player_id);
-    s.rooms.get_mut(room_id).map(|room| {
+    let participants = s.rooms.get_mut(room_id).map(|room| {
         room.participants.remove(player_id);
         room.players_with_updates.remove(player_id);
-    });
-    let participants = s.rooms.get(room_id).map(|room| room.participants.clone()).unwrap_or(HashSet::new());
+        room.participants.clone()
+    }).unwrap_or(HashSet::new());
     send_to_all(&*s, participants.iter(), &ServerMessage::RemovePlayer { id: *player_id })
 }
 
@@ -167,3 +174,21 @@ fn tick(state: Ams) {
         room.players_with_updates.clear()
     }
 }
+
+#[derive(Debug)]
+struct MowsError {
+    reason: String
+}
+
+impl Into<MowsError> for tungstenite::error::Error {
+    fn into(self) -> MowsError {
+        MowsError { reason: format!("{:?}", self)}
+    }
+}
+
+impl Into<MowsError> for serde_json::error::Error {
+    fn into(self) -> MowsError {
+        MowsError { reason: format!("{:?}", self)}
+    }
+}
+
