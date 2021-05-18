@@ -1,4 +1,4 @@
-use std::{env, sync::Arc};
+use std::{sync::Arc};
 use std::time::Duration;
 
 use futures_channel::mpsc::{unbounded, UnboundedSender};
@@ -21,14 +21,18 @@ mod utils;
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     env_logger::init();
-    let addr = env::args().nth(1).unwrap_or_else(|| "127.0.0.1:7000".to_string());
+    let port = std::env::var("WONDER_PORT").unwrap_or("7000".to_string());
+    let tick_interval = std::env::var("TICK_INTERVAL")
+        .map(|v| v.parse::<u64>().unwrap())
+        .unwrap_or(200);
+    let addr = format!("0.0.0.0:{}", port);
     let state = Arc::new(Mutex::new(create_spaces_state()));
-    tokio::spawn(schedule_tick(state.clone()));
+    tokio::spawn(schedule_tick(state.clone(), tick_interval));
     serve(&addr, state).await
 }
 
-async fn schedule_tick(state: Ams) {
-    let mut interval = tokio::time::interval(Duration::from_millis(200));
+async fn schedule_tick(state: Ams, tick_interval: u64) {
+    let mut interval = tokio::time::interval(Duration::from_millis(tick_interval));
     loop {
         interval.tick().await;
         tick(state.clone());
