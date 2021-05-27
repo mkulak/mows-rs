@@ -1,4 +1,6 @@
 use std::{sync::Arc};
+use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use futures_channel::mpsc::{unbounded, UnboundedSender};
@@ -6,14 +8,12 @@ use futures_util::{future, pin_mut, stream::TryStreamExt, StreamExt};
 use log::*;
 use parking_lot::Mutex;
 use tokio::net::{TcpListener, TcpStream};
-use tokio_tungstenite::{accept_hdr_async, accept_hdr_async_with_config};
+use tokio_tungstenite::{accept_hdr_async_with_config};
+use tungstenite::error::Error;
 use tungstenite::protocol::{Message, WebSocketConfig};
 
 use domain::*;
 use utils::*;
-use std::collections::HashSet;
-use std::net::SocketAddr;
-use tungstenite::error::Error;
 
 mod domain;
 mod utils;
@@ -57,6 +57,8 @@ async fn accept_connection(state: Ams, stream: TcpStream, peer: SocketAddr) {
 async fn handle_connection(state: Ams, stream: TcpStream) -> Result<(), MowsError> {
     let mut callback = PathCapturingCallback { path: String::new() };
     let config = WebSocketConfig { max_frame_size: Some(65536), ..WebSocketConfig::default() };
+    info!("max_frame_size: {:?}", config.max_frame_size);
+
     let ws_stream = accept_hdr_async_with_config(stream, &mut callback, Some(config))
         .await.map_err(|e| e.into())?;
     let room_id = callback.path[ROOMS_PREFIX.len()..].to_owned();
