@@ -6,8 +6,8 @@ use futures_util::{future, pin_mut, stream::TryStreamExt, StreamExt};
 use log::*;
 use parking_lot::Mutex;
 use tokio::net::{TcpListener, TcpStream};
-use tokio_tungstenite::{accept_hdr_async};
-use tungstenite::protocol::Message;
+use tokio_tungstenite::{accept_hdr_async, accept_hdr_async_with_config};
+use tungstenite::protocol::{Message, WebSocketConfig};
 
 use domain::*;
 use utils::*;
@@ -56,7 +56,9 @@ async fn accept_connection(state: Ams, stream: TcpStream, peer: SocketAddr) {
 
 async fn handle_connection(state: Ams, stream: TcpStream) -> Result<(), MowsError> {
     let mut callback = PathCapturingCallback { path: String::new() };
-    let ws_stream = accept_hdr_async(stream, &mut callback).await.map_err(|e| e.into())?;
+    let config = WebSocketConfig { max_frame_size: Some(65536), ..WebSocketConfig::default() };
+    let ws_stream = accept_hdr_async_with_config(stream, &mut callback, Some(config))
+        .await.map_err(|e| e.into())?;
     let room_id = callback.path[ROOMS_PREFIX.len()..].to_owned();
 
     let (tx, rx) = unbounded();
